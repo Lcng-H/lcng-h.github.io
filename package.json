@@ -1,0 +1,12 @@
+{
+  "name": "pindou-main",
+  "version": "1.0.0",
+  "description": "本程序为辅助拼豆（Fuse Bead）的制作而开发的辅助工具。以网页形式运行，基于HTML5+JS，所有图形算法均在前端实现。",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
