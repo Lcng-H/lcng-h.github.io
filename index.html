@@ -93,7 +93,8 @@
                         </div>
                         <div class="col-sm-6">
                             <div id="imageControlButtons" class="btn-group" role="group" aria-label="image controls" style="margin-left:0.5rem;">
-                                <button type="button" class="btn btn-primary" id="processImageBtn" disabled>处理图片</button>
+                    <button type="button" class="btn btn-primary" id="processImageBtn" disabled>处理图片</button>
+                    <button type="button" class="btn btn-success" id="exportImageBtn" disabled style="margin-left:0.5rem;">导出为图片</button>
                             </div>
                             <div id="imageWarning" class="text-warning small mt-1"></div>
                         </div>
@@ -154,6 +155,12 @@
                                 <input class="form-check-input" type="checkbox" value="1" id="noSliceIfSmaller">
                                 <label class="form-check-label" for="noSliceIfSmaller">
                                     如果缩放后小于图块大小则不分块
+                                </label>
+                            </div>
+                            <div class="form-check col-sm-2 pl-4">
+                                <input class="form-check-input" type="checkbox" value="1" id="pixelImage">
+                                <label class="form-check-label" for="pixelImage">
+                                    像素图模式
                                 </label>
                             </div>
                         </div>
@@ -484,7 +491,23 @@
             // 处理图片按钮
             $('#processImageBtn').on('click', function () {
                 if (!lastUploadedImage) return;
+                // disable export until processing finished
+                $('#exportImageBtn').prop('disabled', true);
                 processPendingImage({ autoScale: false });
+            });
+
+            // 导出按钮
+            $('#exportImageBtn').on('click', function () {
+                if (!paletteImageData) return;
+                exportFullDesignImage();
+            });
+
+            // 像素图模式切换（影响处理与缩放方式）
+            $('#pixelImage').on('change', function () {
+                window.isPixelImageMode = !!$(this).prop('checked');
+                if (!$('#mainContent').is(':hidden')) {
+                    $('#imageWarning').text('已切换像素图模式，点击“处理图片”以应用更改。');
+                }
             });
 
             //拼豆品牌变化（仅更新调色板，不自动重处理，提示用户手动点击处理）
@@ -777,10 +800,13 @@
                 let newH = Math.max(1, Math.round(h * scale));
                 originalCanvas.width = newW;
                 originalCanvas.height = newH;
+                // If pixel-image mode is on, disable smoothing to preserve hard edges
+                originalCtx.imageSmoothingEnabled = !window.isPixelImageMode;
                 originalCtx.drawImage(img, 0, 0, newW, newH);
             } else {
                 originalCanvas.width = img.width;
                 originalCanvas.height = img.height;
+                originalCtx.imageSmoothingEnabled = !window.isPixelImageMode;
                 originalCtx.drawImage(img, 0, 0);
             }
 
@@ -789,6 +815,9 @@
             toPaletteColor(originalCanvas, document.getElementById('fullCanvas'));
             sliceCanvasToImage(document.getElementById('fullCanvas'), 'sliceImageContainer');
             showFullImageView();
+
+            // enable export button now that processing finished
+            $('#exportImageBtn').prop('disabled', false);
 
             // keep lastUploadedImage so user can tweak options and reprocess without reselecting
             $('#imageWarning').text('');
@@ -923,10 +952,18 @@
             let a = imageData.data[i + 3];
             if (a == 0) continue;
 
-            //加透明度选项
-            let r = ~~(imageData.data[i] * a / 255);
-            let g = ~~(imageData.data[i + 1] * a / 255);
-            let b = ~~(imageData.data[i + 2] * a / 255);
+            // 处理像素图模式：不要做预乘，直接读取原始RGB以保留精确颜色块
+            let r, g, b;
+            if (window.isPixelImageMode) {
+                r = imageData.data[i];
+                g = imageData.data[i + 1];
+                b = imageData.data[i + 2];
+            } else {
+                // 考虑透明度时做预乘
+                r = ~~(imageData.data[i] * a / 255);
+                g = ~~(imageData.data[i + 1] * a / 255);
+                b = ~~(imageData.data[i + 2] * a / 255);
+            }
 
             let x = (i / 4) % sourceCanvas.width;
             let y = ~~((i / 4) / sourceCanvas.width);
@@ -946,6 +983,254 @@
         destCanvas.width = sourceCanvas.width;
         destCanvas.height = sourceCanvas.height;
         destCtx.putImageData(imageData, 0, 0);
+    }
+
+    // 导出完整设计为 PNG（包含完整拼豆图、缩略切块行与颜色统计）
+    function exportFullDesignImage() {
+        try {
+            // use fullCanvas (pure mapped colors) as base to draw clean grid and labels
+            let src = document.getElementById('fullCanvas');
+            if (!src) return;
+
+            let pxW = src.width, pxH = src.height;
+            let cellW = pixelSize + 1, cellH = pixelSize + 1;
+
+            let padding = 16;
+            let leftRulerW = Math.max(40, ~~(cellW));
+            let topRulerH = Math.max(24, ~~(cellH * 0.6));
+            let statWidth = 260;
+            let thumbHeight = 60;
+
+            // compute export canvas size
+            let imgW = pxW * cellW;
+            let imgH = pxH * cellH;
+
+            // compute thumbnails total width (place all thumbnails in a single row so nothing is hidden)
+            let thumbSpacing = 8;
+            let totalThumbWidth = 0;
+            if (sliceImages && sliceImages.length > 0) {
+                // flatten all slice images and compute scaled widths by thumbHeight
+                for (let r = 0; r < sliceImages.length; r++) {
+                    for (let c = 0; c < sliceImages[r].length; c++) {
+                        let imgData = sliceImages[r][c];
+                        if (!imgData) continue;
+                        let dw = Math.round(imgData.width * (thumbHeight / imgData.height));
+                        totalThumbWidth += dw + thumbSpacing;
+                    }
+                }
+                if (totalThumbWidth > 0) totalThumbWidth -= thumbSpacing; // remove last spacing
+            }
+
+            // ensure minimal thumbnail width area
+            totalThumbWidth = Math.max(totalThumbWidth, Math.min(120, imgW));
+
+            // the canvas width should fit left ruler + image + stat area, but also be large enough to fit thumbnails if they extend
+            let canvasW = Math.max(padding + leftRulerW + imgW + statWidth + padding, padding + totalThumbWidth + padding);
+
+            // compute stat area required height based on number of colors to ensure no clipping
+            let statColorEntries = [];
+            try {
+                statColorEntries = colorSum ? [...colorSum.entries()].sort((a, b) => b[1] - a[1]) : [];
+            } catch (e) { statColorEntries = []; }
+            let statLineH = 26;
+            let statHeadingH = 28;
+            let statHeight = statHeadingH + Math.max(0, statColorEntries.length) * statLineH + padding;
+
+            // canvas height should fit top ruler + image + thumbnails (below image) and the stats if they are taller
+            let canvasH = Math.max(padding + topRulerH + imgH + thumbHeight + padding, padding + statHeight + padding);
+
+            let exportCanvas = document.createElement('canvas');
+            exportCanvas.width = canvasW;
+            exportCanvas.height = canvasH;
+            let ctx = exportCanvas.getContext('2d');
+
+            // white bg
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, canvasW, canvasH);
+
+            // draw image area background
+            let imgStartX = padding + leftRulerW;
+            let imgStartY = padding + topRulerH;
+
+            // draw the full color image scaled by cell size
+            // we will draw each pixel as a block to ensure crispness
+            let paletteData = paletteImageData; // mapped palette pixels
+            for (let y = 0; y < pxH; y++) {
+                for (let x = 0; x < pxW; x++) {
+                    let cursor = (y * pxW + x) * 4;
+                    let r = 255, g = 255, b = 255, a = 0;
+                    if (paletteData && paletteData.data && cursor + 3 < paletteData.data.length) {
+                        r = paletteData.data[cursor];
+                        g = paletteData.data[cursor + 1];
+                        b = paletteData.data[cursor + 2];
+                        a = paletteData.data[cursor + 3];
+                    } else {
+                        // fallback read from canvas
+                        try {
+                            let px = src.getContext('2d').getImageData(x, y, 1, 1).data;
+                            r = px[0]; g = px[1]; b = px[2]; a = px[3];
+                        } catch (e) { }
+                    }
+
+                    if (a == 0) continue;
+
+                    ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+                    ctx.fillRect(imgStartX + x * cellW, imgStartY + y * cellH, cellW - 1, cellH - 1);
+                }
+            }
+
+            // draw grid lines
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 1;
+            for (let x = 0; x <= pxW; x++) {
+                let gx = imgStartX + x * cellW - 0.5;
+                ctx.beginPath(); ctx.moveTo(gx, imgStartY); ctx.lineTo(gx, imgStartY + imgH); ctx.stroke();
+            }
+            for (let y = 0; y <= pxH; y++) {
+                let gy = imgStartY + y * cellH - 0.5;
+                ctx.beginPath(); ctx.moveTo(imgStartX, gy); ctx.lineTo(imgStartX + imgW, gy); ctx.stroke();
+            }
+
+            // Draw top ruler (column numbers) with small white boxes for readability
+            ctx.fillStyle = '#000';
+            ctx.font = Math.max(10, ~~(cellH * 0.4)) + 'px monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            for (let x = 0; x < pxW; x++) {
+                let tx = imgStartX + x * cellW + cellW * 0.5;
+                let ty = padding + topRulerH * 0.5;
+                // draw small white box
+                let bw = Math.max(16, ~~(cellW * 0.8));
+                let bh = Math.max(12, ~~(topRulerH * 0.6));
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(tx - bw/2, ty - bh/2, bw, bh);
+                ctx.strokeStyle = '#000';
+                ctx.strokeRect(tx - bw/2, ty - bh/2, bw, bh);
+                ctx.fillStyle = '#000';
+                ctx.fillText((x + 1).toString(), tx, ty);
+            }
+
+            // Draw left ruler (row numbers) with small white boxes
+            ctx.textAlign = 'center';
+            for (let y = 0; y < pxH; y++) {
+                let lx = padding + leftRulerW * 0.5;
+                let ly = imgStartY + y * cellH + cellH * 0.5;
+                let bw = Math.max(24, leftRulerW - 6);
+                let bh = Math.max(12, ~~(cellH * 0.8));
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(lx - bw/2, ly - bh/2, bw, bh);
+                ctx.strokeStyle = '#000';
+                ctx.strokeRect(lx - bw/2, ly - bh/2, bw, bh);
+                ctx.fillStyle = '#000';
+                ctx.fillText((y + 1).toString(), lx, ly);
+            }
+
+            // draw color code (palette name) in center of each cell
+            ctx.font = Math.max(10, ~~(cellH * 0.35)) + 'px monospace';
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'center';
+            for (let y = 0; y < pxH; y++) {
+                for (let x = 0; x < pxW; x++) {
+                    let cursor = (y * pxW + x) * 4;
+                    if (!(paletteData && paletteData.data && cursor + 3 < paletteData.data.length)) continue;
+                    let r = paletteData.data[cursor], g = paletteData.data[cursor + 1], b = paletteData.data[cursor + 2], a = paletteData.data[cursor + 3];
+                    if (a == 0) continue;
+                    let hex = rgbToHex(r, g, b);
+                    let paletteEntry = paletteMap.get(hex);
+                    let label = paletteEntry ? paletteEntry.name : hex;
+                    let cx = imgStartX + x * cellW + cellW * 0.5;
+                    let cy = imgStartY + y * cellH + cellH * 0.5;
+                    // choose font color for contrast
+                    let fontColor = paletteEntry ? getFontColor(hex) : (r + g + b > 384 ? '#000' : '#FFF');
+                    ctx.fillStyle = fontColor;
+                    ctx.fillText(label, cx, cy);
+                }
+            }
+
+            // draw thumbnails row below the image. We will place all thumbnails in a single row (canvas width was sized accordingly)
+            let thumbY = imgStartY + imgH + padding;
+            if (sliceImages && sliceImages.length > 0) {
+                let thumbX = padding;
+                for (let r = 0; r < sliceImages.length; r++) {
+                    for (let c = 0; c < sliceImages[r].length; c++) {
+                        let imgData = sliceImages[r][c];
+                        if (!imgData) continue;
+                        let tmp = document.createElement('canvas');
+                        tmp.width = imgData.width;
+                        tmp.height = imgData.height;
+                        tmp.getContext('2d').putImageData(imgData, 0, 0);
+                        let dw = Math.round(imgData.width * (thumbHeight / imgData.height));
+                        let dh = thumbHeight;
+                        ctx.drawImage(tmp, 0, 0, imgData.width, imgData.height, thumbX, thumbY, dw, dh);
+                        thumbX += dw + thumbSpacing;
+                    }
+                }
+            } else {
+                // fallback draw a single scaled copy of source
+                ctx.drawImage(src, imgStartX, thumbY, Math.min(120, imgW), thumbHeight);
+            }
+
+            // draw color stats on right: only show palette name (色号) next to color block
+            let colorEntries = [...colorSum.entries()].sort((a, b) => b[1] - a[1]);
+            let statX = imgStartX + imgW + padding;
+            let statY = padding;
+            ctx.fillStyle = '#000';
+            ctx.font = '16px monospace';
+            ctx.fillText('颜色统计', statX, statY + 12);
+            statY += 28;
+            ctx.font = '13px monospace';
+            // layout positions
+            let sw = 26; // swatch width
+            let textX = statX + sw + 10;
+            let countX = statX + statWidth - 40; // fixed column for counts
+            let lineH = 26;
+            for (let i = 0; i < colorEntries.length; i++) {
+                let [hex, cnt] = colorEntries[i];
+                if (hex == 'Err') continue;
+                let colorObj = paletteMap.get(hex);
+                if (!colorObj) continue;
+                let yPos = statY + i * lineH;
+                // draw swatch
+                ctx.fillStyle = '#' + hex;
+                ctx.fillRect(statX, yPos, sw, sw);
+                ctx.strokeStyle = '#000';
+                ctx.strokeRect(statX, yPos, sw, sw);
+                // draw name (truncate if too long)
+                let name = colorObj.name;
+                // max text width
+                let maxTextW = statWidth - sw - 60;
+                // truncate with ellipsis
+                while (ctx.measureText(name).width > maxTextW && name.length > 0) {
+                    name = name.substring(0, name.length - 1);
+                }
+                if (name.length < colorObj.name.length) name = name.substring(0, Math.max(1, name.length - 1)) + '…';
+                ctx.fillStyle = '#000';
+                ctx.textAlign = 'left';
+                ctx.fillText(name, textX, yPos + sw * 0.6);
+                // draw count aligned to countX
+                ctx.textAlign = 'right';
+                ctx.fillText('x' + cnt, countX, yPos + sw * 0.6);
+            }
+
+            // export
+            exportCanvas.toBlob(function (blob) {
+                let timestamp = Date.now();
+                let filename = 'pindou_export_' + timestamp + '.png';
+                let a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => {
+                    URL.revokeObjectURL(a.href);
+                    document.body.removeChild(a);
+                }, 2000);
+            }, 'image/png');
+
+        } catch (e) {
+            console.error('导出失败', e);
+            alert('导出失败：' + e.message);
+        }
     }
 
     //将canvas分割为小图并输出为可点击的image集合
